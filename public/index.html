@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Watermark Remover</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: #111;
+            color: #f8fafc;
+            font-family: Arial, sans-serif;
+        }
+
+        main {
+            width: min(960px, calc(100% - 32px));
+            margin: 32px auto;
+        }
+
+        .panel {
+            background: #1f1f1f;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 24px;
+        }
+
+        h1 {
+            margin: 0 0 20px;
+            font-size: 28px;
+            line-height: 1.15;
+        }
+
+        form {
+            display: grid;
+            gap: 18px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+        }
+
+        label {
+            display: grid;
+            gap: 8px;
+            color: #d4d4d4;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        input,
+        select,
+        button {
+            width: 100%;
+            min-height: 44px;
+            border: 1px solid #3f3f46;
+            border-radius: 8px;
+            padding: 10px 12px;
+            background: #111;
+            color: #fff;
+            font-size: 16px;
+        }
+
+        input[type="file"] {
+            padding: 9px;
+        }
+
+        input[type="checkbox"] {
+            width: 18px;
+            min-height: 18px;
+            margin: 0;
+        }
+
+        .checkbox {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 700;
+        }
+
+        .preview {
+            position: relative;
+            overflow: hidden;
+            border: 1px solid #3f3f46;
+            border-radius: 8px;
+            background: #050505;
+        }
+
+        .preview[hidden] {
+            display: none;
+        }
+
+        video {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+
+        canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+            pointer-events: none;
+            touch-action: none;
+        }
+
+        canvas.can-select {
+            pointer-events: auto;
+        }
+
+        .tools {
+            display: grid;
+            grid-template-columns: 1fr auto auto;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .selection {
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            color: #d4d4d4;
+            font-size: 14px;
+        }
+
+        .secondary {
+            width: auto;
+            min-width: 120px;
+            background: #27272a;
+        }
+
+        .primary {
+            background: #2563eb;
+            border-color: #2563eb;
+            cursor: pointer;
+            font-weight: 700;
+        }
+
+        .primary:hover {
+            background: #1d4ed8;
+        }
+
+        @media (max-width: 720px) {
+            main {
+                width: min(100% - 20px, 960px);
+                margin: 16px auto;
+            }
+
+            .panel {
+                padding: 16px;
+            }
+
+            .grid,
+            .tools {
+                grid-template-columns: 1fr;
+            }
+
+            .secondary {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main>
+        <section class="panel">
+            <h1>Gemini Watermark Remover</h1>
+
+            <form id="processForm" action="/process" method="POST" enctype="multipart/form-data">
+                <label>
+                    Video
+                    <input id="videoInput" type="file" name="video" accept="video/*" required>
+                </label>
+
+                <div class="grid">
+                    <label>
+                        Removal mode
+                        <select id="removalMode" name="removalMode">
+                            <option value="auto">Auto corner estimate</option>
+                            <option value="manual">Manual box</option>
+                        </select>
+                    </label>
+
+                    <label>
+                        Auto position
+                        <select id="autoPosition" name="autoPosition">
+                            <option value="bottom-right">Bottom right</option>
+                            <option value="bottom-left">Bottom left</option>
+                            <option value="top-right">Top right</option>
+                            <option value="top-left">Top left</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div id="preview" class="preview" hidden>
+                    <video id="videoPreview" controls muted playsinline></video>
+                    <canvas id="selectionCanvas"></canvas>
+                </div>
+
+                <div class="tools">
+                    <div id="selectionText" class="selection">Select a video to start.</div>
+                    <button class="secondary" id="guessButton" type="button">Use Guess</button>
+                    <button class="secondary" id="clearButton" type="button">Clear Box</button>
+                </div>
+
+                <label class="checkbox">
+                    <input type="checkbox" name="gpu">
+                    Use NVIDIA GPU encoding
+                </label>
+
+                <input id="videoWidth" type="hidden" name="videoWidth">
+                <input id="videoHeight" type="hidden" name="videoHeight">
+                <input id="maskX" type="hidden" name="maskX">
+                <input id="maskY" type="hidden" name="maskY">
+                <input id="maskW" type="hidden" name="maskW">
+                <input id="maskH" type="hidden" name="maskH">
+
+                <button class="primary" type="submit">Remove Watermark</button>
+            </form>
+        </section>
+    </main>
+
+    <script>
+        const form = document.getElementById("processForm");
+        const videoInput = document.getElementById("videoInput");
+        const preview = document.getElementById("preview");
+        const video = document.getElementById("videoPreview");
+        const canvas = document.getElementById("selectionCanvas");
+        const ctx = canvas.getContext("2d");
+        const removalMode = document.getElementById("removalMode");
+        const autoPosition = document.getElementById("autoPosition");
+        const selectionText = document.getElementById("selectionText");
+        const guessButton = document.getElementById("guessButton");
+        const clearButton = document.getElementById("clearButton");
+        const fields = {
+            videoWidth: document.getElementById("videoWidth"),
+            videoHeight: document.getElementById("videoHeight"),
+            maskX: document.getElementById("maskX"),
+            maskY: document.getElementById("maskY"),
+            maskW: document.getElementById("maskW"),
+            maskH: document.getElementById("maskH")
+        };
+
+        let objectUrl = null;
+        let startPoint = null;
+        let selection = null;
+
+        function hasVideoSize() {
+            return video.videoWidth > 0 && video.videoHeight > 0;
+        }
+
+        function updateCanvasMode() {
+            canvas.classList.toggle("can-select", removalMode.value === "manual");
+        }
+
+        function resizeCanvas() {
+            if (!preview.hidden) {
+                const rect = video.getBoundingClientRect();
+                canvas.width = Math.max(1, Math.round(rect.width));
+                canvas.height = Math.max(1, Math.round(rect.height));
+                drawSelection();
+            }
+        }
+
+        function nativePoint(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = ((event.clientX - rect.left) / rect.width) * video.videoWidth;
+            const y = ((event.clientY - rect.top) / rect.height) * video.videoHeight;
+
+            return {
+                x: Math.min(Math.max(x, 0), video.videoWidth),
+                y: Math.min(Math.max(y, 0), video.videoHeight)
+            };
+        }
+
+        function normalizeBox(a, b) {
+            const x = Math.min(a.x, b.x);
+            const y = Math.min(a.y, b.y);
+            const w = Math.abs(a.x - b.x);
+            const h = Math.abs(a.y - b.y);
+
+            return {
+                x: Math.round(x),
+                y: Math.round(y),
+                w: Math.round(w),
+                h: Math.round(h)
+            };
+        }
+
+        function displayBox(box) {
+            const scaleX = canvas.width / video.videoWidth;
+            const scaleY = canvas.height / video.videoHeight;
+
+            return {
+                x: box.x * scaleX,
+                y: box.y * scaleY,
+                w: box.w * scaleX,
+                h: box.h * scaleY
+            };
+        }
+
+        function updateFields() {
+            fields.videoWidth.value = hasVideoSize() ? video.videoWidth : "";
+            fields.videoHeight.value = hasVideoSize() ? video.videoHeight : "";
+            fields.maskX.value = selection ? selection.x : "";
+            fields.maskY.value = selection ? selection.y : "";
+            fields.maskW.value = selection ? selection.w : "";
+            fields.maskH.value = selection ? selection.h : "";
+
+            if (!hasVideoSize()) {
+                selectionText.textContent = "Select a video to start.";
+                return;
+            }
+
+            if (!selection) {
+                selectionText.textContent = "No manual box selected.";
+                return;
+            }
+
+            selectionText.textContent =
+                `Box: x ${selection.x}, y ${selection.y}, ${selection.w} x ${selection.h}`;
+        }
+
+        function drawSelection() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (!selection || !hasVideoSize()) {
+                updateFields();
+                return;
+            }
+
+            const box = displayBox(selection);
+            ctx.fillStyle = "rgba(37, 99, 235, 0.18)";
+            ctx.strokeStyle = "#facc15";
+            ctx.lineWidth = 2;
+            ctx.fillRect(box.x, box.y, box.w, box.h);
+            ctx.strokeRect(box.x + 1, box.y + 1, Math.max(1, box.w - 2), Math.max(1, box.h - 2));
+            updateFields();
+        }
+
+        function setAutoGuess() {
+            if (!hasVideoSize()) return;
+
+            const w = Math.round(video.videoWidth * 0.24);
+            const h = Math.round(video.videoHeight * 0.13);
+            const marginX = Math.round(video.videoWidth * 0.03);
+            const marginY = Math.round(video.videoHeight * 0.04);
+            const position = autoPosition.value;
+            const x = position.endsWith("right") ? video.videoWidth - w - marginX : marginX;
+            const y = position.startsWith("bottom") ? video.videoHeight - h - marginY : marginY;
+
+            selection = { x, y, w, h };
+            drawSelection();
+        }
+
+        videoInput.addEventListener("change", () => {
+            const file = videoInput.files && videoInput.files[0];
+            selection = null;
+            startPoint = null;
+
+            if (objectUrl) {
+                URL.revokeObjectURL(objectUrl);
+                objectUrl = null;
+            }
+
+            if (!file) {
+                preview.hidden = true;
+                video.removeAttribute("src");
+                video.load();
+                updateFields();
+                return;
+            }
+
+            objectUrl = URL.createObjectURL(file);
+            video.src = objectUrl;
+            preview.hidden = false;
+            selectionText.textContent = "Loading preview...";
+        });
+
+        video.addEventListener("loadedmetadata", () => {
+            fields.videoWidth.value = video.videoWidth;
+            fields.videoHeight.value = video.videoHeight;
+            resizeCanvas();
+            updateCanvasMode();
+            setAutoGuess();
+        });
+
+        window.addEventListener("resize", resizeCanvas);
+
+        autoPosition.addEventListener("change", () => {
+            if (removalMode.value === "auto") {
+                setAutoGuess();
+            }
+        });
+
+        removalMode.addEventListener("change", () => {
+            updateCanvasMode();
+
+            if (removalMode.value === "auto") {
+                setAutoGuess();
+            } else {
+                drawSelection();
+            }
+        });
+
+        guessButton.addEventListener("click", () => {
+            setAutoGuess();
+        });
+
+        clearButton.addEventListener("click", () => {
+            selection = null;
+            drawSelection();
+        });
+
+        canvas.addEventListener("pointerdown", (event) => {
+            if (!hasVideoSize()) return;
+
+            startPoint = nativePoint(event);
+            selection = { x: startPoint.x, y: startPoint.y, w: 0, h: 0 };
+            canvas.setPointerCapture(event.pointerId);
+            drawSelection();
+        });
+
+        canvas.addEventListener("pointermove", (event) => {
+            if (!startPoint || !hasVideoSize()) return;
+
+            selection = normalizeBox(startPoint, nativePoint(event));
+            drawSelection();
+        });
+
+        canvas.addEventListener("pointerup", (event) => {
+            if (!startPoint || !hasVideoSize()) return;
+
+            selection = normalizeBox(startPoint, nativePoint(event));
+            startPoint = null;
+            drawSelection();
+        });
+
+        canvas.addEventListener("pointercancel", () => {
+            startPoint = null;
+        });
+
+        form.addEventListener("submit", (event) => {
+            if (removalMode.value === "manual" && (!selection || selection.w < 8 || selection.h < 8)) {
+                event.preventDefault();
+                selectionText.textContent = "Manual mode needs a larger box.";
+            }
+        });
+
+        updateCanvasMode();
+    </script>
+</body>
+
+</html>
